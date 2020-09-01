@@ -1,0 +1,10 @@
+.idea
+.idea/*
+
+*/*.csv
+*/*.json
+*/*/*.csv
+*/*/*.json
+
+*/*.pt
+*/*/*.pt
