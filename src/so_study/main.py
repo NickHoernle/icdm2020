@@ -1,10 +1,9 @@
-import numpy as np
+import sys
 import os
 import argparse
 import logging
 import torch
 from torch.utils.data import TensorDataset, DataLoader
-from torch.nn.utils import clip_grad_norm_
 from torch.backends import cudnn
 from tqdm import tqdm
 
@@ -50,7 +49,7 @@ def setup_cuda(seed, device):
 loss_fn = lambda x1,x2,x3: models.ZeroInflatedPoisson_loss_function(x1,x2,x3)
 
 
-def main(args, loader_params, models_to_test):
+def main(args, experiment_settings):
 
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     if not args.no_cuda and not use_cuda:
@@ -89,6 +88,9 @@ def main(args, loader_params, models_to_test):
     learning_rate = 1e-5
     # weight_decay = 1e-5
     window_len = 5*7
+
+    loader_params = experiment_settings.common_params
+    loader_params["data_path"] = args.input
 
     dset_train = so_data.StackOverflowDatasetIncCounts(
         dset_type='train',
@@ -140,6 +142,9 @@ def main(args, loader_params, models_to_test):
 
     if not os.path.exists(f'{args.output}/logs/'):
         os.mkdir(f'{args.output}/logs/')
+
+    if not os.path.exists(f'{args.output}/models/'):
+        os.mkdir(f'{args.output}/models/')
 
     log_fh = open(f'{args.output}/logs/{model_name}.log', 'w')
     best_loss = sys.float_info.max
@@ -239,7 +244,7 @@ def test(args, model, device, valid_loader):
 def construct_parser():
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch main script to run inference detailed here: '
-                                                 'https://arxiv.org/abs/2002.06160'
+                                                 'https://arxiv.org/abs/2002.06160 '
                                                  'on the population of users who achieved Strunk & White')
     parser.add_argument('--batch-size', type=int, default=128, metavar='N',
                         help='input batch size for training (default: 128)')
@@ -267,6 +272,8 @@ def construct_parser():
                         help='how long is the window that is considered before / after a badge (default: 35)')
     parser.add_argument('-M', '--model-name', default="full_personalised_normalizing_flow", required=False,
                         help='Choose the model to run')
+    parser.add_argument('-D', '--target-badge', default="StrunkWhite", required=False,
+                        help='Which badge do you want to run inference on?')
     parser.add_argument('-i', '--input', required=True, help='Path to the input data for the model to read')
     parser.add_argument('-o', '--output', required=True, help='Path to the directory to write output to')
     return parser

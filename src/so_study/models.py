@@ -4,8 +4,7 @@ from torch.nn import functional as F
 import math
 import torch.distributions as distrib
 from torch.distributions import Poisson
-from normalizing_flows import NormalizingFlow
-from normalizing_flows import PlanarFlow
+from .normalizing_flows import NormalizingFlow
 
 # BADGE_THRESHOLD = 80
 poisson_loss = nn.PoissonNLLLoss(reduction='sum', log_input=False)
