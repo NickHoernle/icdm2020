@@ -1,6 +1,7 @@
-import fire
+from so_study.main import construct_parser, main
 
 if __name__ == '__main__':
-    fire.Fire({
 
-    })
+    parser = construct_parser()
+    args = parser.parse_args()
+    main(args)
