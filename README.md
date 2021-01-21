@@ -24,7 +24,7 @@ The individual files should be joined into one source file for data and can be p
 # Running code
 The modeling code is run as follows:
 ```
-
+run_inference.py --input data/pt_editor --output experiments/StrunkWhite --target-badge StrunkWhite --epochs 2000 --early-stopping-lim 250 --model-name full_personalised_normalizing_flow --quiet --no-cuda --lr 0.0001 --gamma 0.99
 ```
 
 (The experimental hyperparameter search is in the `scripts/experiment.txt` file)

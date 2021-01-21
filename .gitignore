@@ -1,6 +1,8 @@
 .idea
 .idea/*
 
+data/*
+
 */*.csv
 */*.json
 */*/*.csv
