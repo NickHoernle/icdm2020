@@ -40,34 +40,48 @@ def ZeroInflatedPoisson_loss_function(recon_x, x, latent_loss):
 
     return -log_l.sum() + latent_loss
 
-def ZIP_loss(recon_x, x, latent_loss=0, log_cluster_pred=None, test=False):
+def ZIP_loss(recon_x, x, latent_loss=0, weights=0, lambda_=0, logit_cluster_pred=None):
 
-    count_pred = F.softplus(recon_x[:, :, 1, :])
+    if type(logit_cluster_pred) == type(None):
+        count_pred = F.softplus(recon_x[:, 1, :])
 
-    log_theta = F.logsigmoid(recon_x[:, :, 0, :])
-    log_1_min_theta = F.logsigmoid(-recon_x[:, :, 0, :])
+        log_theta = F.logsigmoid(recon_x[:, 0, :])
+        log_1_min_theta = F.logsigmoid(-recon_x[:, 0, :])
 
-    pois_lp = log_theta + Poisson(count_pred).log_prob(x)
-    x0_term = torch.logsumexp(torch.stack((log_1_min_theta, pois_lp), dim=-1), dim=-1)
+        pois_lp = log_theta + Poisson(count_pred).log_prob(x)
+        x0_term = torch.logsumexp(torch.stack((log_1_min_theta, pois_lp), dim=-1), dim=-1)
 
-    # theta + (1-theta)*Pois(0|lambda) if x ==0 else (1-theta)*Pois(x|lambda)
-    log_l = torch.where(x == 0, x0_term, pois_lp)
-    half_way = log_l.shape[2]//2
-    log_l[:, :, (half_way-2, half_way-1, half_way)] = 0
-
-    if type(log_cluster_pred) == type(None):
+        # theta + (1-theta)*Pois(0|lambda) if x ==0 else (1-theta)*Pois(x|lambda)
+        log_l = torch.where(x == 0, x0_term, pois_lp)
         log_l = log_l.sum(dim=-1).mean()
         return latent_loss - log_l
 
-    cluster_pred = log_cluster_pred.exp()
+    before_weights, after_weights, weight_params = weights
+    before, after = weight_params
 
-    zp, nc = .9, log_cluster_pred.size(1)-1
-    log_prior = torch.log(torch.tensor([zp] + [(1-zp)/nc for i in range(nc)]))
+    log_cp_b = F.logsigmoid(logit_cluster_pred[:, 0])
+    log_1min_cp_b = F.logsigmoid(-logit_cluster_pred[:, 0])
 
-    # import pdb
-    # pdb.set_trace()
-    return -(cluster_pred*(log_l.sum(dim=-1) - log_cluster_pred + log_prior)).sum(dim=-1).mean() + latent_loss
-    # return -(cluster_pred*(log_l.sum(dim=-1) - log_cluster_pred)).sum(dim=-1).mean() + latent_loss
+    log_cp_a = F.logsigmoid(logit_cluster_pred[:, 1])
+    log_1min_cp_a = F.logsigmoid(-logit_cluster_pred[:, 1])
+
+    for before, wb in zip(weight_params[0], [log_cp_b, log_1min_cp_b]):
+        for after, wa in zip(weight_params[1], [log_cp_a, log_1min_cp_a]):
+            count_pred = F.softplus(recon_x[:, 1, :] + )
+
+            log_theta = F.logsigmoid(recon_x[:, 0, :])
+            log_1_min_theta = F.logsigmoid(-recon_x[:, 0, :])
+
+            pois_lp = log_theta + Poisson(count_pred).log_prob(x)
+            x0_term = torch.logsumexp(torch.stack((log_1_min_theta, pois_lp), dim=-1), dim=-1)
+
+            # theta + (1-theta)*Pois(0|lambda) if x ==0 else (1-theta)*Pois(x|lambda)
+            log_l = torch.where(x == 0, x0_term, pois_lp)
+            log_l = log_l.sum(dim=-1).mean()
+
+
+    return -((cluster_pred*(log_l.sum(dim=-1) - log_cluster_pred)).sum(dim=-1)).mean() + latent_loss + lambda_*l2_norm
+
 
 def Pois_loss(recon_x, x, latent_loss=0, logit_cluster_pred=None):
 
@@ -191,8 +205,6 @@ class Baseline(nn.Module):
         self.in_channels = kwargs.get('in_channels', 1)
         self.block = kwargs.get('block', False)
 
-        self.name = "Model0"
-
         self.encoder = nn.Sequential(
             nn.Linear(self.input_lim*self.in_channels, 100),
             nn.ReLU(True),
@@ -206,17 +218,16 @@ class Baseline(nn.Module):
         hidden_size = 5
 
         # self.decoder = MADE(51, [200, 200], self.latent_dim, 51 * 2, natural_ordering=True)
-        # self.decoder = nn.Sequential(
-        #     nn.Linear(self.latent_dim, 100),
-        #     nn.ReLU(True),
-        #     nn.BatchNorm1d(100),
-        #     nn.Linear(100, 100),
-        #     nn.ReLU(True),
-        #     nn.BatchNorm1d(100),
-        #     nn.Linear(100, 7*2)
-        # )
-
-        self.decoder = nn.GRU(input_size=1, hidden_size=self.latent_dim, num_layers=self.in_channels, batch_first=True, dropout=0)
+        # self.decoder = nn.GRU(input_size=1, hidden_size=self.latent_dim, num_layers=self.in_channels, batch_first=True, dropout=0)
+        self.decoder = nn.Sequential(
+            nn.Linear(self.latent_dim, 100),
+            nn.ReLU(True),
+            nn.BatchNorm1d(100),
+            nn.Linear(100, 100),
+            nn.ReLU(True),
+            nn.BatchNorm1d(100),
+            nn.Linear(100, 7*2)
+        )
         self.fc_decoder = nn.Sequential(nn.ReLU(True), nn.Linear(self.latent_dim, 2))
 
         self.apply(init_weights)
@@ -246,21 +257,18 @@ class Baseline(nn.Module):
         return encoded[:, :self.latent_dim], encoded[:, self.latent_dim:]
 
     def decode(self, x, z):
-        hidden_layer = z.unsqueeze(0).repeat(self.in_channels, 1, 1)
-        predictions = []
-        for i in range(0, x.size(-1) - 1):
-            # print(x[:, :, i].unsqueeze(-1).shape)
-            preds, hidden_layer_ = self.decoder(x[:, :, i].unsqueeze(-1), hidden_layer)
-            # print(preds.shape, hidden_layer_.shape)
-            predictions.append(self.fc_decoder(preds.squeeze(1)))
-
-        if self.in_channels == 1:
-            return torch.stack(predictions, dim=-1).unsqueeze(1)
-        # pred = self.decoder(z)
-        # out = torch.stack(pred.split(7, dim=-1), dim=1).repeat(1, 1, (self.output_len+8)//7)[:, :, :self.output_len]
-        # import pdb
-        # pdb.set_trace()
-        # return out.unsqueeze(1)
+        # hidden_layer = z.unsqueeze(0).repeat(self.in_channels, 1, 1)
+        # predictions = []
+        # for i in range(0, x.size(-1) - 1):
+        #     # print(x[:, :, i].unsqueeze(-1).shape)
+        #     preds, hidden_layer_ = self.decoder(x[:, :, i].unsqueeze(-1), hidden_layer)
+        #     # print(preds.shape, hidden_layer_.shape)
+        #     predictions.append(self.fc_decoder(preds.squeeze(1)))
+        #
+        # if self.in_channels == 1:
+        #     return torch.stack(predictions, dim=-1).unsqueeze(1)
+        pred = self.decoder(z)
+        return torch.stack(pred.split(7, dim=-1), dim=1).repeat(1, 1, (self.output_len+8)//7)[:, :, :self.output_len]
 
     def forward(self, x):
         zparams = self.encode(x)
@@ -273,76 +281,23 @@ class AddBeta(Baseline):
     def __init__(self, **kwargs):
         super(AddBeta, self).__init__(**kwargs)
 
-        self.k_binomial = nn.Parameter(.1*torch.randn((self.in_channels, self.output_len), requires_grad=True).float())
-        self.k_activity = nn.Parameter(.1*torch.randn((self.in_channels, self.output_len), requires_grad=True).float())
+        self.k_binomial = nn.Parameter(torch.randn((self.in_channels, self.output_len), requires_grad=True).float())
+        self.k_activity = nn.Parameter(torch.randn((self.in_channels, self.output_len), requires_grad=True).float())
 
         # self.decoder = MADE(51, [200, 200], 0, 51 * 2, natural_ordering=True)
-        self.name = "Model1"
 
         self.softplus = nn.Softplus()
         self.apply(init_weights)
 
     @property
     def k_bin_pos(self):
-        offset = torch.ones_like(self.k_binomial)
-
-        offset[:, 0::2] *= .5 # even (positive effect)
-        offset[:, 1::2] *= .2 # odd (negative effect)
-
-        # before badge
-        offset[:, 0::4] = self.apply_window_fn_b(offset[:, 0::4])
-        offset[:, 1::4] = self.apply_window_fn_b(offset[:, 1::4])
-
-        # after badge
-        offset[:, 2::4] = self.apply_window_fn_a(offset[:, 2::4])
-        offset[:, 3::4] = self.apply_window_fn_a(offset[:, 3::4])
-
-        return self.softplus(self.k_binomial) + offset
+        return self.softplus(self.k_binomial)
+        # return self.k_binomial
 
     @property
     def k_act_pos(self):
-        offset = torch.ones_like(self.k_activity)
-
-        offset[:, 0::2] *= .5 # even (positive effect)
-        offset[:, 1::2] *= .2 # odd (negative effect)
-
-        # before badge
-        offset[:, 0::4] = self.apply_window_fn_b(offset[:, 0::4])
-        offset[:, 1::4] = self.apply_window_fn_b(offset[:, 1::4])
-
-        # after badge
-        offset[:, 2::4] = self.apply_window_fn_a(offset[:, 2::4])
-        offset[:, 3::4] = self.apply_window_fn_a(offset[:, 3::4])
-
-        return self.softplus(self.k_activity) + offset
-
-    def apply_window_fn_b(self, weights):
-        mu = self.date_of_threshold_cross-1
-        l = self.date_of_threshold_cross/5
-        ones = torch.arange(weights.size(-1)).float()
-        wndw = (-(ones-mu).pow(2)/(2*l**2)).exp()
-        return weights*wndw
-
-    def apply_window_fn(self, weights):
-        # mu = self.date_of_threshold_cross-1
-        # l = self.date_of_threshold_cross/4
-        # ones = torch.arange(weights.size(-1)).float()
-        # wndw = (-(ones-mu).pow(2)/(2*l**2)).exp()
-        return weights#*wndw
-
-    def apply_window_fn_a(self, weights):
-        mu = 0
-        l = self.date_of_threshold_cross/5
-        ones = torch.arange(weights.size(-1)).float()
-        wndw = (-(ones-mu).pow(2)/(2*l**2)).exp()
-        return weights*wndw
-
-    # def apply_window_fn(self, weights):
-    #     mu = 0
-    #     l = 20
-    #     ones = torch.arange(weights.size(-1)).float()
-    #     wndw = (-(ones-mu).pow(2)/(2*l**2)).exp()
-    #     return weights*wndw
+        return self.softplus(self.k_activity)
+        # return self.k_activity
 
     def get_weights(self, x):
 
@@ -354,15 +309,6 @@ class AddBeta(Baseline):
         act_weights = (effect_weight*self.k_act_pos).unsqueeze(0).repeat(len(x), 1, 1)
 
         return bin_weights, act_weights
-
-    def forward(self, x):
-        zparams = self.encode(x)
-        z, latent_loss = self.latent_loss(x, zparams)
-        predictions = self.decode(x, z)
-        bin_weights, act_weights = self.get_weights(x)
-        weights = torch.stack((bin_weights, act_weights), dim=-2)
-        predict = predictions + weights
-        return predict, (latent_loss, z)
 
     # def decode(self, x, z):
     #     activity = super().decode(x, z)
@@ -377,13 +323,11 @@ class AddBeta(Baseline):
 class AddClassPred(AddBeta):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.weights = kwargs.get("weights", [(0, 0, 0, 0), (1, 0, 1, 0)])
+        self.weights = kwargs.get("weights", [[0, 1], [0, -1]])
         self.num_clusters = len(self.weights)
 
-        self.k_binomial = nn.Parameter(.1*torch.randn((self.in_channels, self.num_clusters*4, self.output_len//2), requires_grad=True).float())
-        self.k_activity = nn.Parameter(.1*torch.randn((self.in_channels, self.num_clusters*4, self.output_len//2), requires_grad=True).float())
-
-        self.name = "Model2"
+        self.k_binomial = nn.Parameter(torch.randn((self.in_channels, self.num_clusters*2, self.output_len//2), requires_grad=True).float())
+        self.k_activity = nn.Parameter(torch.randn((self.in_channels, self.num_clusters*2, self.output_len//2), requires_grad=True).float())
 
         self.encoder = nn.Sequential(
             nn.Linear(self.input_lim * self.in_channels, 50),
@@ -415,112 +359,87 @@ class AddClassPred(AddBeta):
                encoded[:, self.latent_dim:], \
                cluster_pred
 
-    def get_weight_options(self):
+    def get_weights(self):
 
-        binary_pred, count_pred = [], []
+        before_weights, after_weights = [], []
 
-        for (bin_b, bin_a, cnt_b, cnt_a) in self.weights:
+        before = self.weights[0]
+        after = self.weights[1]
 
+        for i, weight in enumerate(before):
             bin_weight = torch.zeros(self.output_len)
             act_weight = torch.zeros(self.output_len)
 
-            # before
-            bin_weight[:self.output_len // 2] = bin_b * (self.k_bin_pos[0, 0] if bin_b > 0 else self.k_bin_pos[0, 1])
-            act_weight[:self.output_len // 2] = cnt_b * (self.k_act_pos[0, 0] if cnt_b > 0 else self.k_act_pos[0, 1])
+            bin_weight[:self.output_len // 2] = weight * (self.k_bin_pos[0, 0] if weight < 0 else self.k_bin_pos[0, 1])
+            act_weight[:self.output_len // 2] = weight * (self.k_act_pos[0, 0] if weight < 0 else self.k_act_pos[0, 1])
+            before_weights.append({"bin": bin_weight, "act": act_weight})
 
-            # after
-            bin_weight[self.output_len // 2:] = bin_a * (self.k_bin_pos[0, 2] if bin_a > 0 else self.k_bin_pos[0, 3])
-            act_weight[self.output_len // 2:] = cnt_a * (self.k_act_pos[0, 2] if cnt_a > 0 else self.k_act_pos[0, 3])
+        for i, weight in enumerate(after):
+            bin_weight = torch.zeros(self.output_len)
+            act_weight = torch.zeros(self.output_len)
 
-            if self.block:
-                bin_weight[self.output_len // 2 - 2: self.output_len // 2 + 1] = bin_weight[self.output_len// 2 - 3]
-                act_weight[self.output_len // 2 - 2: self.output_len // 2 + 1] = act_weight[self.output_len// 2 - 3]
+            bin_weight[self.output_len // 2:] = weight * (self.k_bin_pos[0, 2] if weight < 0 else self.k_bin_pos[0, 3])
+            act_weight[self.output_len // 2:] = weight * (self.k_act_pos[0, 2] if weight < 0 else self.k_act_pos[0, 3])
+            after_weights.append({"bin": bin_weight, "act": act_weight})
 
-            binary_pred.append(bin_weight)
-            count_pred.append(act_weight)
+        return before_weights, after_weights, self.weights
 
-        return self.apply_window_fn(torch.stack(binary_pred, dim=0)), self.apply_window_fn(torch.stack(count_pred, dim=0))
-
-    def get_weights(self, cp):
-
-        bin_weights, act_weights = self.get_weight_options()
-        user_w = torch.ones_like(cp)
-
-        bin_weights = bin_weights.unsqueeze(0)*user_w.unsqueeze(-1)
-        act_weights = act_weights.unsqueeze(0)*user_w.unsqueeze(-1)
-
-        return torch.stack((bin_weights, act_weights), dim=2)
+    # def get_weights(self, x, **kwargs):
+    #
+    #     bin_weights, act_weights, weight_params = self.get_weight_options()
+    #
+    #     num_users = x.size(0)
+    #
+    #     bin_weights = bin_weights.repeat(num_users, 1, 1)
+    #     act_weights = act_weights.repeat(num_users, 1, 1)
+    #
+    #     return bin_weights, act_weights
+    #
+    # def decode(self, x, z, **kwargs):
+    #     activities = Baseline.decode(self, x, z).unsqueeze(1)
+    #     return activities
 
     def forward(self, x, **kwargs):
         mu, lv, cluster_pred = self.encode(x)
-
         z, latent_loss = self.latent_loss(x, (mu, lv))
         predictions = self.decode(x, z, **kwargs)
-
-        weights = self.get_weights(cluster_pred)
-        # my_weight = torch.sigmoid(z[:, -1]).unsqueeze(1).unsqueeze(1).unsqueeze(1)
-
-        log_cp = F.log_softmax(cluster_pred, dim=1)
-        predictions = predictions.repeat(1, self.num_clusters, 1, 1)
-        predict = predictions + weights
-
-        return (predict, log_cp), (latent_loss, z)
-
+        return (predictions, cluster_pred), (latent_loss, z)
 
 
 class MultipleClassPred(AddClassPred):
     def __init__(self, **kwargs):
+        kwargs["weights"] = [(0, 0), (0, 1), (1, 0)]
         super().__init__(**kwargs)
-        self.name = "Model3"
 
     def get_weight_options(self):
+        bin_weights, act_weights = [], []
+        bin_trend = torch.zeros(self.in_channels, self.output_len)
+        act_trend = torch.zeros(self.in_channels, self.output_len)
 
-        binary_pred, count_pred = [], []
+        bin_trend[:, :self.output_len // 2] = (self.k_binomial[:, -1])
+        bin_trend[:, self.output_len // 2:] = (self.k_binomial[:, -2])
 
-        for (i, bin_b, bin_a, cnt_b, cnt_a) in self.weights:
-            bin_weight = torch.zeros(self.output_len)
-            act_weight = torch.zeros(self.output_len)
+        act_trend[:, :self.output_len // 2] = (self.k_activity[:, -1])
+        act_trend[:, self.output_len // 2:] = (self.k_activity[:, -2])
 
-            # before
-            bin_weight[:self.output_len // 2] = bin_b * (self.k_bin_pos[0, 4*i] if bin_b > 0 else self.k_bin_pos[0, 4*i+1])
-            act_weight[:self.output_len // 2] = cnt_b * (self.k_act_pos[0, 4*i] if cnt_b > 0 else self.k_act_pos[0, 4*i+1])
+        for i, (b, a) in enumerate(self.weights):
+            bin_weight = torch.zeros(self.in_channels, self.output_len)
 
-            # after
-            bin_weight[self.output_len // 2:] = bin_a * (self.k_bin_pos[0, 4*i+2] if bin_a > 0 else self.k_bin_pos[0, 4*i+3])
-            act_weight[self.output_len // 2:] = cnt_a * (self.k_act_pos[0, 4*i+2] if cnt_a > 0 else self.k_act_pos[0, 4*i+3])
+            bin_weight[:, :self.output_len // 2] = b*(self.k_bin_pos[:, i])
+            bin_weight[:, self.output_len // 2:] = a*(self.k_bin_pos[:, i])
+            bin_weight += bin_trend
 
+            act_weight = torch.zeros(self.in_channels, self.output_len)
+            act_weight[:, :self.output_len // 2] = b * (self.k_act_pos[:, i])
+            act_weight[:, self.output_len // 2:] = a * (self.k_act_pos[:, i])
+            act_trend += act_trend
             if self.block:
-                bin_weight[self.output_len // 2 - 2: self.output_len // 2 + 1] = bin_weight[self.output_len// 2 - 3]
-                act_weight[self.output_len // 2 - 2: self.output_len // 2 + 1] = act_weight[self.output_len// 2 - 3]
+                bin_weight[self.t_cross - 2: self.t_cross + 1] = 0
+                bin_weight[self.t_cross - 2: self.t_cross + 1] = 0
+            bin_weights.append(bin_weight)
+            act_weights.append(act_weight)
 
-            binary_pred.append(bin_weight)
-            count_pred.append(act_weight)
-
-        return self.apply_window_fn(torch.stack(binary_pred, dim=0)), self.apply_window_fn(torch.stack(count_pred, dim=0))
-
-
-# class MultipleClassPred(AddClassPred):
-#     def __init__(self, **kwargs):
-#         kwargs["weights"] = [(0, 0), (0, 1), (1, 0), (1, -1)]
-#         super().__init__(**kwargs)
-#
-#     def get_weight_options(self):
-#         bin_weights, act_weights = [], []
-#
-#         for i, (b, a) in enumerate(self.weights):
-#             bin_weight = torch.zeros(self.output_len)
-#             act_weight = torch.zeros(self.output_len)
-#
-#             bin_weight[:self.output_len // 2] = b*(self.k_bin_pos[0, 2*i])
-#             bin_weight[self.output_len // 2:] = a*(self.k_bin_pos[0, 2*i+1])
-#
-#             act_weight[:self.output_len // 2] = b * (self.k_act_pos[0, 2*i])
-#             act_weight[self.output_len // 2:] = a * (self.k_act_pos[0, 2*i+1])
-#
-#             bin_weights.append(bin_weight)
-#             act_weights.append(act_weight)
-#
-#         return torch.stack(bin_weights, dim=0), torch.stack(act_weights, dim=0)
+        return torch.stack(bin_weights, dim=1), torch.stack(act_weights, dim=1), self.weights
 
 
 class AddReputation(MultipleClassPred):
